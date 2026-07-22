@@ -1,0 +1,17 @@
+# Mapping org iTop -> clients.code di dashboard.
+# Match utama by itop_org_id (stabil); fallback by itop_org_name (case-insensitive).
+# Org yang tidak terdaftar di sini akan DI-SKIP (WARN di log) — tidak pernah nebak client.
+#
+# Cara cari org_id: iTop > Data administration > Organizations, atau lihat log WARN
+# "org tidak ter-mapping (org_id=..)" saat sync jalan.
+
+orgs:
+  - itop_org_id: 27
+    itop_org_name: "PT Bio Farma (Persero)"
+    dashboard_code: "BIOFARMA"
+  # - itop_org_id: 0
+  #   itop_org_name: "PT Solusi Teknologi Indonesia"
+  #   dashboard_code: "STI"
+  # - itop_org_id: 0
+  #   itop_org_name: "Harita Kencana"
+  #   dashboard_code: "HK"

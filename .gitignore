@@ -1,0 +1,11 @@
+.env
+*.db
+logs/
+.venv/
+__pycache__/
+.pytest_cache/
+
+# Jangan upload ke GitHub: file macOS & dokumentasi lokal
+*.md
+*.plist
+.DS_Store
