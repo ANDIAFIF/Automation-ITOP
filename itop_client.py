@@ -82,7 +82,10 @@ class ItopClient:
             "auth_pwd": self.password,
             "json_data": json.dumps(json_data),
         }
-        resp = self._session.post(self.endpoint, data=form, timeout=self.timeout)
+        try:
+            resp = self._session.post(self.endpoint, data=form, timeout=self.timeout)
+        except requests.RequestException as e:
+            raise ItopError(f"iTop tidak terjangkau: {e}") from e
         if resp.status_code != 200:
             raise ItopError(f"iTop HTTP {resp.status_code}: {resp.text[:200]}")
         try:
@@ -132,8 +135,55 @@ class ItopClient:
             "limit": limit,
         }
         data = self._call(payload)
-        objects = data.get("objects") or {}
+        tickets = self._parse_objects(data, itop_class)
 
+        # urutkan by last_update supaya HWM maju konsisten
+        tickets.sort(key=lambda t: t["fields"].get("last_update") or "")
+        return tickets
+
+    # ------------------------------------------------------------------
+    # get_tickets_by_period — SEMUA tiket dalam rentang start_date
+    # (untuk fitur Sync periode laporan; independen dari HWM delta)
+    # ------------------------------------------------------------------
+    def get_tickets_by_period(
+        self,
+        itop_class: str,
+        period_start: str,
+        period_end: str,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """
+        Fetch semua tiket 1 class yang start_date-nya di [period_start, period_end]
+        (tanggal 'YYYY-MM-DD'). Paging via parameter `page` core/get sampai habis —
+        tidak menyentuh HWM (dipakai sync periode laporan, bukan delta loop).
+        """
+        oql = (
+            f"SELECT {itop_class} WHERE start_date >= '{period_start} 00:00:00' "
+            f"AND start_date <= '{period_end} 23:59:59'"
+        )
+        out: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            payload = {
+                "operation": "core/get",
+                "class": itop_class,
+                "key": oql,
+                "output_fields": OUTPUT_FIELDS,
+                "limit": limit,
+                "page": page,
+            }
+            data = self._call(payload)
+            tickets = self._parse_objects(data, itop_class)
+            out.extend(tickets)
+            if len(tickets) < limit:
+                break
+            page += 1
+        out.sort(key=lambda t: t["fields"].get("start_date") or "")
+        return out
+
+    @staticmethod
+    def _parse_objects(data: dict[str, Any], itop_class: str) -> list[dict[str, Any]]:
+        objects = data.get("objects") or {}
         tickets: list[dict[str, Any]] = []
         # format key: "UserRequest::123"
         for obj_key, obj in objects.items():
@@ -143,9 +193,6 @@ class ItopClient:
             except (TypeError, ValueError):
                 obj_id = 0
             tickets.append({"id": obj_id, "class": itop_class, "key": obj_key, "fields": fields})
-
-        # urutkan by last_update supaya HWM maju konsisten
-        tickets.sort(key=lambda t: t["fields"].get("last_update") or "")
         return tickets
 
 

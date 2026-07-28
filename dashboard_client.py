@@ -47,6 +47,63 @@ class DashboardClient:
     def endpoint(self) -> str:
         return f"{self.base_url}/api/integrations/itop"
 
+    @property
+    def sync_requests_endpoint(self) -> str:
+        return f"{self.base_url}/api/integrations/itop/sync-requests"
+
+    # ------------------------------------------------------------------
+    # Antrian sync periode (dibuat analis dari UI Generate Laporan)
+    # ------------------------------------------------------------------
+    def fetch_sync_requests(self) -> list[dict[str, Any]]:
+        """GET permintaan sync berstatus pending. Tanpa retry — dipanggil
+        tiap poll cycle, cycle berikutnya otomatis mencoba lagi."""
+        if not self.base_url or not self.api_key:
+            raise DashboardError(
+                "Dashboard config kosong (cek DASHBOARD_BASE_URL/DASHBOARD_API_KEY di .env)"
+            )
+        try:
+            resp = self._session.get(
+                self.sync_requests_endpoint,
+                headers={"X-API-Key": self.api_key},
+                timeout=self.timeout,
+            )
+        except requests.RequestException as e:
+            raise DashboardError(f"GET sync-requests gagal: {e}") from e
+        if resp.status_code == 404:
+            # dashboard belum di-deploy versi dengan endpoint ini — bukan error fatal
+            return []
+        if resp.status_code != 200:
+            raise DashboardError(f"GET sync-requests HTTP {resp.status_code}: {resp.text[:300]}")
+        try:
+            return resp.json().get("requests") or []
+        except ValueError as e:
+            raise DashboardError(f"sync-requests response bukan JSON: {resp.text[:300]}") from e
+
+    def update_sync_request(
+        self,
+        request_id: str,
+        status: str,
+        stats: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> None:
+        """PATCH status permintaan sync (running/done/error)."""
+        body: dict[str, Any] = {"id": request_id, "status": status}
+        if stats is not None:
+            body["stats"] = stats
+        if error is not None:
+            body["error"] = error
+        try:
+            resp = self._session.patch(
+                self.sync_requests_endpoint,
+                json=body,
+                headers={"X-API-Key": self.api_key},
+                timeout=self.timeout,
+            )
+        except requests.RequestException as e:
+            raise DashboardError(f"PATCH sync-request gagal: {e}") from e
+        if resp.status_code != 200:
+            raise DashboardError(f"PATCH sync-request HTTP {resp.status_code}: {resp.text[:300]}")
+
     def push(
         self, tickets: list[dict[str, Any]], overwrite_mode: str = "full"
     ) -> list[dict[str, Any]]:

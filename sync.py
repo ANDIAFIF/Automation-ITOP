@@ -7,6 +7,12 @@ Modes:
     --backfill-days N   Set HWM = sekarang - N hari, lalu langsung run 1 cycle.
     --once              Run 1x poll cycle lalu exit (cocok untuk cron / debug).
     --loop              Loop terus tiap POLL_INTERVAL_SECONDS detik.
+                        Tiap cycle juga memproses antrian sync periode dari
+                        dashboard (GET /api/integrations/itop/sync-requests).
+    --period S E        Sync SEMUA tiket periode start_date [S, E] (YYYY-MM-DD)
+                        ke cache dashboard — independen dari HWM (HWM tidak
+                        disentuh). Untuk pencocokan laporan BiWeekly.
+    --client CODE       (dengan --period) hanya push klien dashboard tsb.
     --dry-run           Fetch + mapping saja, jangan POST ke dashboard,
                         HWM tidak maju.
     --class <name>      Restrict ke 1 class iTop (default: UserRequest + Incident).
@@ -26,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 import time
 from datetime import datetime, timedelta
@@ -149,9 +156,126 @@ def poll_class(
 
 
 # -----------------------------------------------------------------------------
+# Sync periode (laporan BiWeekly) — SEMUA tiket dalam rentang start_date,
+# independen dari HWM. Dipanggil dari CLI --period atau antrian dashboard.
+# -----------------------------------------------------------------------------
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def run_period_sync(
+    itop: ItopClient,
+    dashboard: DashboardClient,
+    period_start: str,
+    period_end: str,
+    client_code: str | None = None,
+    classes: list[str] | None = None,
+    dry_run: bool = False,
+) -> dict[str, int]:
+    """
+    Fetch semua tiket periode dari iTop, normalize, push ke cache dashboard.
+    HWM TIDAK disentuh. Return stats {fetched, pushed, unmapped, skipped_client}.
+    Raise ItopError/DashboardError/ValueError kalau gagal — caller yang lapor.
+    """
+    # tanggal dipakai literal di OQL — tolak format aneh (termasuk dari antrian)
+    for label, val in (("period_start", period_start), ("period_end", period_end)):
+        if not _DATE_RE.match(val or ""):
+            raise ValueError(f"{label} harus YYYY-MM-DD, dapat: {val!r}")
+
+    mappings = get_org_mappings()
+    stats = {"fetched": 0, "pushed": 0, "unmapped": 0, "skipped_client": 0}
+
+    for cls in classes or TICKET_CLASSES:
+        tickets = itop.get_tickets_by_period(
+            cls, period_start, period_end, limit=settings.batch_limit
+        )
+        stats["fetched"] += len(tickets)
+
+        batch: list[dict] = []
+        batch_meta: list[tuple[int, str | None, str | None, str]] = []
+        for t in tickets:
+            payload = normalize_ticket(t, mappings)
+            if payload is None:
+                stats["unmapped"] += 1
+                continue
+            if client_code and payload["client_code"] != client_code:
+                stats["skipped_client"] += 1
+                continue
+            batch.append(payload)
+            batch_meta.append(
+                (t["id"], payload["ticket_itop"],
+                 t["fields"].get("last_update") or None, payload_hash(payload))
+            )
+
+        if dry_run:
+            for p in batch:
+                log.info("[%s] [DRY-RUN] period sync would push %s (%s)",
+                         cls, p["ticket_itop"], p["event_status"])
+            continue
+
+        # push per batch_limit — cache upsert idempotent, aman di-push ulang
+        for i in range(0, len(batch), settings.batch_limit):
+            chunk = batch[i : i + settings.batch_limit]
+            dashboard.push(chunk, overwrite_mode=settings.overwrite_mode)
+            for tid, ref, last_update, phash in batch_meta[i : i + settings.batch_limit]:
+                state.record_synced(cls, tid, ref, last_update, phash)
+            stats["pushed"] += len(chunk)
+        log.info("[%s] Period sync %s..%s: fetched=%d pushed(kumulatif)=%d",
+                 cls, period_start, period_end, len(tickets), stats["pushed"])
+
+    return stats
+
+
+def process_sync_requests(
+    itop: ItopClient, dashboard: DashboardClient, dry_run: bool
+) -> None:
+    """
+    Ambil antrian sync periode yang dibuat analis di dashboard (tombol
+    "Sync iTop" halaman Generate Laporan), eksekusi, lalu lapor statusnya.
+    Gagal di satu request tidak memblok request lain.
+    """
+    try:
+        requests_ = dashboard.fetch_sync_requests()
+    except DashboardError as e:
+        log.warning("Gagal ambil antrian sync: %s", e)
+        return
+    if not requests_:
+        return
+
+    for req in requests_:
+        rid = req.get("id")
+        start = req.get("period_start") or ""
+        end = req.get("period_end") or ""
+        code = req.get("client_code") or None
+        log.info("Sync request %s: klien=%s periode=%s..%s", rid, code or "SEMUA", start, end)
+
+        if dry_run:
+            log.info("[DRY-RUN] sync request %s tidak dieksekusi", rid)
+            continue
+
+        try:
+            dashboard.update_sync_request(rid, "running")
+            stats = run_period_sync(itop, dashboard, start, end, client_code=code)
+            dashboard.update_sync_request(rid, "done", stats=stats)
+            log.info("Sync request %s selesai: %s", rid, stats)
+        except Exception as e:  # lapor error ke dashboard, jangan matikan loop
+            log.exception("Sync request %s gagal: %s", rid, e)
+            try:
+                dashboard.update_sync_request(rid, "error", error=str(e)[:500])
+            except DashboardError as e2:
+                log.error("Gagal lapor error sync request %s: %s", rid, e2)
+
+
+# -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
-def run(mode: str, classes: list[str], dry_run: bool, backfill_days: int | None) -> int:
+def run(
+    mode: str,
+    classes: list[str],
+    dry_run: bool,
+    backfill_days: int | None,
+    period: tuple[str, str] | None = None,
+    client_code: str | None = None,
+) -> int:
     state.init_db()
     get_org_mappings()  # fail-fast kalau clients_map.yaml rusak
 
@@ -171,12 +295,27 @@ def run(mode: str, classes: list[str], dry_run: bool, backfill_days: int | None)
     itop = ItopClient.from_settings()
     dashboard = DashboardClient.from_settings()
 
+    if mode == "period":
+        assert period is not None
+        try:
+            stats = run_period_sync(
+                itop, dashboard, period[0], period[1],
+                client_code=client_code, classes=classes, dry_run=dry_run,
+            )
+        except (ItopError, DashboardError, ValueError) as e:
+            log.error("Period sync gagal: %s", e)
+            return 1
+        log.info("Period sync %s..%s selesai: %s", period[0], period[1], stats)
+        return 0
+
     def _one_cycle() -> None:
         for cls in classes:
             try:
                 poll_class(cls, itop, dashboard, dry_run)
             except Exception as e:
                 log.exception("[%s] Unhandled error di poll cycle: %s", cls, e)
+        # antrian sync periode dari dashboard (tombol "Sync iTop" di UI laporan)
+        process_sync_requests(itop, dashboard, dry_run)
 
     if mode == "once":
         _one_cycle()
@@ -201,9 +340,13 @@ def main() -> int:
     g.add_argument("--seed", action="store_true", help="Set HWM = sekarang tanpa push")
     g.add_argument("--once", action="store_true", help="Run 1x cycle lalu exit")
     g.add_argument("--loop", action="store_true", help="Loop terus tiap POLL_INTERVAL_SECONDS")
+    g.add_argument("--period", nargs=2, metavar=("START", "END"), default=None,
+                   help="Sync semua tiket periode start_date [START, END] (YYYY-MM-DD), HWM tidak disentuh")
 
     parser.add_argument("--backfill-days", type=int, default=None,
                         help="Reset HWM ke N hari lalu sebelum run")
+    parser.add_argument("--client", default=None,
+                        help="(dengan --period) hanya push klien dashboard code tsb, mis. AF")
     parser.add_argument("--dry-run", action="store_true",
                         help="Jangan POST ke dashboard, HWM tidak maju")
     parser.add_argument("--class", dest="itop_class", default=None,
@@ -225,9 +368,18 @@ def main() -> int:
         handlers=handlers,
     )
 
-    mode = "seed" if args.seed else ("once" if args.once else "loop")
+    if args.seed:
+        mode = "seed"
+    elif args.once:
+        mode = "once"
+    elif args.period:
+        mode = "period"
+    else:
+        mode = "loop"
     classes = [args.itop_class] if args.itop_class else TICKET_CLASSES
-    return run(mode, classes, args.dry_run, args.backfill_days)
+    period = (args.period[0], args.period[1]) if args.period else None
+    return run(mode, classes, args.dry_run, args.backfill_days,
+               period=period, client_code=args.client)
 
 
 if __name__ == "__main__":

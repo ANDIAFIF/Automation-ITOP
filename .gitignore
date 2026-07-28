@@ -9,3 +9,12 @@ __pycache__/
 *.md
 *.plist
 .DS_Store
+
+# Telegram userbot session = setara password akun, JANGAN pernah di-commit
+*.session
+*.session-journal
+sessions/
+exports/
+
+# Arsip: gampang kebawa rahasia tanpa sadar
+*.zip

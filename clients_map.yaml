@@ -12,6 +12,11 @@ orgs:
   # - itop_org_id: 0
   #   itop_org_name: "PT Solusi Teknologi Indonesia"
   #   dashboard_code: "STI"
+  # dashboard_code HARUS sama dengan clients.code di dashboard
+  # (lihat soc-dashboard/lib/report/clients.ts kolom db_code):
   # - itop_org_id: 0
-  #   itop_org_name: "Harita Kencana"
-  #   dashboard_code: "HK"
+  #   itop_org_name: "PT Harita Kencana Sekuritas"
+  #   dashboard_code: "AF"
+  # - itop_org_id: 0
+  #   itop_org_name: "PT Phintraco Sekuritas"
+  #   dashboard_code: "PHIN"

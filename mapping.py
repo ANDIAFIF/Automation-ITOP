@@ -17,6 +17,9 @@ from typing import Any
 from config import OrgMapping, resolve_client_code
 
 NOTE_MAX_LEN = 2000
+# Deskripsi mentah iTop (HTML) ikut dikirim ke kolom itop_tickets.description —
+# dashboard mem-parse IP/port/severity/waktu event dari sini saat autofill form.
+DESCRIPTION_MAX_LEN = 20000
 
 # -----------------------------------------------------------------------------
 # Status mapping — iTop status → EVENT_STATUS_OPTIONS
@@ -148,8 +151,11 @@ def normalize_ticket(
     note = f"{header}\n{note_body}" if note_body else header
     note = note[:NOTE_MAX_LEN]
 
+    description_raw = (fields.get("description") or "")[:DESCRIPTION_MAX_LEN] or None
+
     return {
         "ticket_itop": fields.get("ref") or f"{itop_class}::{ticket.get('id')}",
+        "description": description_raw,
         "record_type": map_record_type(itop_class),
         "source_class": itop_class,
         "client_code": client_code,
