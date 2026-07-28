@@ -2,7 +2,7 @@
 discover.py — Recon read-only ke instance iTop SEBELUM sync dijalankan.
 
 Jalankan sekali dari PC yang bisa akses iTop (butuh .env terisi):
-    .venv/bin/python discover.py
+    .venv\Scripts\python discover.py    (Windows; Mac dev: .venv/bin/python discover.py)
 
 Output:
   1. Operations yang tersedia untuk REST user (harus ada core/get)

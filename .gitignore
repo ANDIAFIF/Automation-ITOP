@@ -7,6 +7,8 @@ __pycache__/
 
 # Jangan upload ke GitHub: file macOS & dokumentasi lokal
 *.md
+# README wajib ikut repo — instruksi setup harus sampai ke PC bridge Windows via git pull
+!README.md
 *.plist
 .DS_Store
 
