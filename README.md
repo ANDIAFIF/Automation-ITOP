@@ -88,6 +88,9 @@ laporan, tarik SEMUA tiket periode (by `start_date`, HWM tidak disentuh):
 ```bat
 rem manual dari PC (mis. periode laporan 20 Jul - 27 Jul, hanya klien AF):
 .venv\Scripts\python sync.py --period 2026-07-20 2026-07-27 --client AF
+
+rem batas boleh pakai jam juga (tanda kutip wajib):
+.venv\Scripts\python sync.py --period "2026-07-20 08:00" "2026-07-27 17:30" --client AF
 ```
 
 Otomatis dari dashboard: tombol **Sync iTop (via PC)** di halaman Generate

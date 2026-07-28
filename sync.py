@@ -9,9 +9,11 @@ Modes:
     --loop              Loop terus tiap POLL_INTERVAL_SECONDS detik.
                         Tiap cycle juga memproses antrian sync periode dari
                         dashboard (GET /api/integrations/itop/sync-requests).
-    --period S E        Sync SEMUA tiket periode start_date [S, E] (YYYY-MM-DD)
-                        ke cache dashboard — independen dari HWM (HWM tidak
-                        disentuh). Untuk pencocokan laporan BiWeekly.
+    --period S E        Sync SEMUA tiket periode start_date [S, E] ke cache
+                        dashboard — independen dari HWM (HWM tidak disentuh).
+                        Batas boleh tanggal saja ('2026-07-20') atau tanggal+jam
+                        ('2026-07-20 08:00', pakai tanda kutip). Untuk
+                        pencocokan laporan BiWeekly.
     --client CODE       (dengan --period) hanya push klien dashboard tsb.
     --dry-run           Fetch + mapping saja, jangan POST ke dashboard,
                         HWM tidak maju.
@@ -160,6 +162,13 @@ def poll_class(
 # independen dari HWM. Dipanggil dari CLI --period atau antrian dashboard.
 # -----------------------------------------------------------------------------
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def _normalize_time(raw: str | None, default: str) -> str:
+    """'HH:MM' / 'HH:MM:SS' (postgres time) / None → 'HH:MM'."""
+    t = (raw or "").strip()[:5]
+    return t if t else default
 
 
 def run_period_sync(
@@ -170,23 +179,30 @@ def run_period_sync(
     client_code: str | None = None,
     classes: list[str] | None = None,
     dry_run: bool = False,
+    start_time: str = "00:00",
+    end_time: str = "23:59",
 ) -> dict[str, int]:
     """
-    Fetch semua tiket periode dari iTop, normalize, push ke cache dashboard.
-    HWM TIDAK disentuh. Return stats {fetched, pushed, unmapped, skipped_client}.
+    Fetch semua tiket periode (tanggal + jam) dari iTop, normalize, push ke
+    cache dashboard. HWM TIDAK disentuh. Return stats {fetched, pushed,
+    unmapped, skipped_client}.
     Raise ItopError/DashboardError/ValueError kalau gagal — caller yang lapor.
     """
-    # tanggal dipakai literal di OQL — tolak format aneh (termasuk dari antrian)
+    # tanggal & jam dipakai literal di OQL — tolak format aneh (termasuk dari antrian)
     for label, val in (("period_start", period_start), ("period_end", period_end)):
         if not _DATE_RE.match(val or ""):
             raise ValueError(f"{label} harus YYYY-MM-DD, dapat: {val!r}")
+    for label, val in (("start_time", start_time), ("end_time", end_time)):
+        if not _TIME_RE.match(val or ""):
+            raise ValueError(f"{label} harus HH:MM, dapat: {val!r}")
 
     mappings = get_org_mappings()
     stats = {"fetched": 0, "pushed": 0, "unmapped": 0, "skipped_client": 0}
 
     for cls in classes or TICKET_CLASSES:
         tickets = itop.get_tickets_by_period(
-            cls, period_start, period_end, limit=settings.batch_limit
+            cls, period_start, period_end, limit=settings.batch_limit,
+            start_time=start_time, end_time=end_time,
         )
         stats["fetched"] += len(tickets)
 
@@ -219,8 +235,9 @@ def run_period_sync(
             for tid, ref, last_update, phash in batch_meta[i : i + settings.batch_limit]:
                 state.record_synced(cls, tid, ref, last_update, phash)
             stats["pushed"] += len(chunk)
-        log.info("[%s] Period sync %s..%s: fetched=%d pushed(kumulatif)=%d",
-                 cls, period_start, period_end, len(tickets), stats["pushed"])
+        log.info("[%s] Period sync %s %s..%s %s: fetched=%d pushed(kumulatif)=%d",
+                 cls, period_start, start_time, period_end, end_time,
+                 len(tickets), stats["pushed"])
 
     return stats
 
@@ -245,8 +262,11 @@ def process_sync_requests(
         rid = req.get("id")
         start = req.get("period_start") or ""
         end = req.get("period_end") or ""
+        start_time = _normalize_time(req.get("period_start_time"), "00:00")
+        end_time = _normalize_time(req.get("period_end_time"), "23:59")
         code = req.get("client_code") or None
-        log.info("Sync request %s: klien=%s periode=%s..%s", rid, code or "SEMUA", start, end)
+        log.info("Sync request %s: klien=%s periode=%s %s..%s %s",
+                 rid, code or "SEMUA", start, start_time, end, end_time)
 
         if dry_run:
             log.info("[DRY-RUN] sync request %s tidak dieksekusi", rid)
@@ -254,7 +274,10 @@ def process_sync_requests(
 
         try:
             dashboard.update_sync_request(rid, "running")
-            stats = run_period_sync(itop, dashboard, start, end, client_code=code)
+            stats = run_period_sync(
+                itop, dashboard, start, end, client_code=code,
+                start_time=start_time, end_time=end_time,
+            )
             dashboard.update_sync_request(rid, "done", stats=stats)
             log.info("Sync request %s selesai: %s", rid, stats)
         except Exception as e:  # lapor error ke dashboard, jangan matikan loop
@@ -297,10 +320,14 @@ def run(
 
     if mode == "period":
         assert period is not None
+        # tiap batas boleh 'YYYY-MM-DD' atau 'YYYY-MM-DD HH:MM'
+        start_date, _, start_time = period[0].partition(" ")
+        end_date, _, end_time = period[1].partition(" ")
         try:
             stats = run_period_sync(
-                itop, dashboard, period[0], period[1],
+                itop, dashboard, start_date, end_date,
                 client_code=client_code, classes=classes, dry_run=dry_run,
+                start_time=start_time or "00:00", end_time=end_time or "23:59",
             )
         except (ItopError, DashboardError, ValueError) as e:
             log.error("Period sync gagal: %s", e)
@@ -341,7 +368,8 @@ def main() -> int:
     g.add_argument("--once", action="store_true", help="Run 1x cycle lalu exit")
     g.add_argument("--loop", action="store_true", help="Loop terus tiap POLL_INTERVAL_SECONDS")
     g.add_argument("--period", nargs=2, metavar=("START", "END"), default=None,
-                   help="Sync semua tiket periode start_date [START, END] (YYYY-MM-DD), HWM tidak disentuh")
+                   help="Sync semua tiket periode start_date [START, END] — "
+                        "'YYYY-MM-DD' atau 'YYYY-MM-DD HH:MM' (pakai kutip); HWM tidak disentuh")
 
     parser.add_argument("--backfill-days", type=int, default=None,
                         help="Reset HWM ke N hari lalu sebelum run")

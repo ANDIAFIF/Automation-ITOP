@@ -151,15 +151,19 @@ class ItopClient:
         period_start: str,
         period_end: str,
         limit: int = 100,
+        start_time: str = "00:00",
+        end_time: str = "23:59",
     ) -> list[dict[str, Any]]:
         """
-        Fetch semua tiket 1 class yang start_date-nya di [period_start, period_end]
-        (tanggal 'YYYY-MM-DD'). Paging via parameter `page` core/get sampai habis —
+        Fetch semua tiket 1 class yang start_date-nya di
+        [period_start start_time, period_end end_time] (tanggal 'YYYY-MM-DD',
+        jam 'HH:MM'). Paging via parameter `page` core/get sampai habis —
         tidak menyentuh HWM (dipakai sync periode laporan, bukan delta loop).
+        Validasi format nilai adalah tanggung jawab caller (sync.run_period_sync).
         """
         oql = (
-            f"SELECT {itop_class} WHERE start_date >= '{period_start} 00:00:00' "
-            f"AND start_date <= '{period_end} 23:59:59'"
+            f"SELECT {itop_class} WHERE start_date >= '{period_start} {start_time}:00' "
+            f"AND start_date <= '{period_end} {end_time}:59'"
         )
         out: list[dict[str, Any]] = []
         page = 1

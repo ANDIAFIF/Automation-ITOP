@@ -64,8 +64,9 @@ class FakeItop:
         self.tickets = tickets
         self.calls: list[tuple] = []
 
-    def get_tickets_by_period(self, cls, start, end, limit=100):
-        self.calls.append((cls, start, end))
+    def get_tickets_by_period(self, cls, start, end, limit=100,
+                              start_time="00:00", end_time="23:59"):
+        self.calls.append((cls, start, end, start_time, end_time))
         return [t for t in self.tickets if t["class"] == cls]
 
 
@@ -118,6 +119,27 @@ def test_period_sync_rejects_bad_dates():
         sync.run_period_sync(FakeItop([]), FakeDashboard(), "2026-07-20' OR 1=1 --", "2026-07-27")
 
 
+def test_period_sync_jam_diteruskan_dan_divalidasi():
+    itop = FakeItop([_ticket(1, "Harita Kencana", "R-000001")])
+    sync.run_period_sync(itop, FakeDashboard(), "2026-07-20", "2026-07-27",
+                         start_time="08:00", end_time="17:30")
+    assert itop.calls[0][3:] == ("08:00", "17:30")
+    # jam rusak / injection ditolak
+    with pytest.raises(ValueError):
+        sync.run_period_sync(FakeItop([]), FakeDashboard(), "2026-07-20", "2026-07-27",
+                             start_time="25:00")
+    with pytest.raises(ValueError):
+        sync.run_period_sync(FakeItop([]), FakeDashboard(), "2026-07-20", "2026-07-27",
+                             end_time="17:30' OR 1=1")
+
+
+def test_normalize_time():
+    assert sync._normalize_time("08:00:00", "00:00") == "08:00"  # postgres time
+    assert sync._normalize_time("17:30", "00:00") == "17:30"
+    assert sync._normalize_time(None, "23:59") == "23:59"
+    assert sync._normalize_time("", "00:00") == "00:00"
+
+
 def test_period_sync_dry_run_pushes_nothing():
     itop = FakeItop([_ticket(1, "Harita Kencana", "R-000001")])
     dash = FakeDashboard()
@@ -146,10 +168,14 @@ class FakeDashboardQueue(FakeDashboard):
 def test_process_sync_requests_done_and_error():
     itop = FakeItop([_ticket(1, "Harita Kencana", "R-000001")])
     dash = FakeDashboardQueue([
-        {"id": "req-1", "period_start": "2026-07-20", "period_end": "2026-07-27", "client_code": "AF"},
+        {"id": "req-1", "period_start": "2026-07-20", "period_end": "2026-07-27",
+         "client_code": "AF", "period_start_time": "08:00:00", "period_end_time": "17:30:00"},
         {"id": "req-2", "period_start": "TANGGAL-RUSAK", "period_end": "2026-07-27", "client_code": None},
     ])
     sync.process_sync_requests(itop, dash, dry_run=False)
+
+    # jam dari antrian (format postgres HH:MM:SS) dinormalisasi & diteruskan ke iTop
+    assert itop.calls[0][3:] == ("08:00", "17:30")
 
     by_req = {}
     for rid, status, stats, error in dash.updates:
